@@ -244,3 +244,92 @@
 5. ロールバック手順（失敗時の戻し方）
 
 このテンプレートをリポジトリのPRチェックで必須化し、未充足の場合は自動でマージ不可にする。
+
+---
+
+## 12. 転用ガイド：Spring Boot + Thymeleaf + Oracle + GitLab 版ベスト構成
+
+「このプロジェクトのハーネス思想」を Java/Spring 系へ移植する場合は、技術スタックを置換しつつ、
+**Spec-first / Policy as Code / GitOps 的運用**をそのまま残すのが最適。
+
+### 12.1 推奨リポジトリ構成（モノレポ）
+
+- `spec/`
+  - `kpi/`（KPI定義 YAML）
+  - `ui/`（画面定義 YAML: ウィジェット、フィルタ、権限）
+  - `policy/`（アクセス制御・公開可否ルール）
+- `app/`
+  - `backend/`（Spring Boot）
+  - `frontend/`（Thymeleafテンプレート + Alpine.js等の最小JS）
+- `data/`
+  - `flyway/`（DDL・初期データ）
+  - `sql/`（参照SQL、Materialized View管理）
+- `ops/`
+  - `gitlab-ci/`（CIテンプレ）
+  - `runbooks/`（自動復旧手順）
+  - `monitoring/`（Prometheus/Grafana定義）
+
+### 12.2 アプリ設計（Spring Boot / Thymeleaf）
+
+- Spring Bootは **Hexagonal Architecture** を推奨。
+  - `domain`: KPI計算・業務ルール
+  - `application`: ユースケース
+  - `infrastructure`: Oracleアクセス（MyBatis/JOOQ/JPAいずれか）
+  - `presentation`: Controller + Thymeleaf
+- Thymeleafは「画面ロジック最小化」を徹底。
+  - 表示条件は `policy` 判定結果をViewModelに反映
+  - 大きな動的UIが必要な箇所のみJS強化（全面SPA化は避ける）
+- DTOとEntityを分離し、レポート用途の読み取りモデルを別定義（CQRS-lite）する。
+
+### 12.3 Oracle参照の実装原則
+
+- OracleはOLTP直参照ではなく、**参照専用スキーマ**またはViewを介して読む。
+- KPI用SQLは `data/sql/kpi_*.sql` として管理し、SQL単体テストをCIに組み込む。
+- パフォーマンス基準:
+  - 主要集計SQLに対し `EXPLAIN PLAN` を定期取得
+  - P95しきい値超過でマージ不可
+- 接続安全性:
+  - HikariCP + `READ ONLY` トランザクション
+  - SecretはGitLab CI Variables/Vault連携で注入
+
+### 12.4 GitLab運用（ハーネス適用ポイント）
+
+- `main` 保護 + `CODEOWNERS` + 必須パイプライン成功。
+- `gitlab-ci.yml` を以下の段階に分離:
+  1. `spec-lint`（YAMLスキーマ検証）
+  2. `generate`（Specからコード/設定生成）
+  3. `build-test`（unit/integration）
+  4. `oracle-sql-test`（SQL検証、実行計画チェック）
+  5. `security`（SAST/Dependency/Secret Detection）
+  6. `deploy`（stg→canary→prod）
+- Approvalは「人手承認」より **ポリシー承認（機械ゲート）**を優先。
+- 失敗時は自動ロールバックJobとインシデントIssue自動起票を連動。
+
+### 12.5 監視・自動復旧（最低限）
+
+- 監視KPI:
+  - Oracle参照遅延（query latency）
+  - バッチ遅延
+  - 画面応答時間（server-side render時間）
+  - 権限拒否率の異常増加
+- 自動復旧:
+  - 接続プール枯渇時の段階的再起動
+  - 失敗バッチ再実行
+  - キャッシュ再構築
+
+### 12.6 導入順（現実的な60日プラン）
+
+- Day 1-15: 現行画面/KPI/SQLを `spec/` へ棚卸し
+- Day 16-30: Spring Boot層をHexagonalへ整理、Oracle参照をRead Model化
+- Day 31-45: GitLab CIに品質ゲート（SQL/性能/セキュリティ）導入
+- Day 46-60: Canary配信 + 自動ロールバック + 運用Runbook自動化
+
+### 12.7 この転用で守るべき非交渉項目
+
+1. KPI定義をJavaコードに直書きしない（必ず `spec/` 起点）
+2. Oracle本番表への直接更新権限をアプリに与えない
+3. GitLabの必須ゲートを「警告」運用にしない（失敗時は確実に止める）
+4. 例外運用は先に標準テンプレート化してから許可する
+
+この4点を守ると、Spring Boot + Thymeleaf + Oracle + GitLab でも、
+本ドキュメントのハーネス思想（宣言的・自動統制・自律運用）を高い再現性で移植できる。
